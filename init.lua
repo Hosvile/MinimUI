@@ -1,12 +1,22 @@
 -- MinimUI
--- Right Ctrl hides and shows every window. Touch, or no keyboard, also gets a Hide / Show button.
+-- Right Ctrl, or the corner icon, hides and shows every window. The icon stays on screen.
 --
 -- local Window = MinimUI:Window({ Title = "Minim", File = "minim" })
 -- local Enabled = Window:Toggle({ Text = "Enabled", Flag = "Enabled", Default = false, Callback = function(value) end })
 -- local Amount = Window:Slider({ Text = "Amount", Flag = "Amount", Min = 0, Max = 100, Default = 35, Callback = function(value) end })
 -- local Fruit = Window:Dropdown({ Text = "Fruit", Flag = "Fruit", Options = { "Apple", "Banana", "Cherry" }, Default = "Banana", Callback = function(value) end })
 -- local Fruits = Window:MultiDropdown({ Text = "Fruits", Flag = "Fruits", Options = { "Apple", "Banana", "Cherry" }, Default = { "Apple", "Cherry" }, Callback = function(value) end })
--- local Name = Window:Textbox({ Text = "Name", Flag = "Name", Placeholder = "Type a name", Default = "", Callback = function(value) end })
+-- local Name = Window:Textbox({
+-- 	Text = "Name", Flag = "Name", Placeholder = "Type a name", Default = "",
+-- 	Required = true, Min = 2, Max = 16, Pattern = "^[%a ]+$",
+-- 	Validate = function(text)
+-- 		if string.find(string.lower(text), "phone") then
+-- 			return "warn", "Phone is not a name"
+-- 		end
+-- 	end,
+-- 	Callback = function(value, level, message) end,
+-- })
+-- local Text, Level, Message = Name:Get()
 -- local Tint = Window:Color({ Text = "Color", Flag = "Color", Default = Color3.fromRGB(208, 188, 255), Callback = function(value) end })
 -- local Mode = Window:Mode({ Text = "Mode", Flag = "Mode", Options = { "Legit", "Blatant", "Quiet farm" }, Default = "Legit", Callback = function(value) end })
 -- Window:Button({ Text = "Apply", Callback = function()
@@ -27,7 +37,6 @@
 local Players = cloneref(game:GetService("Players"))
 local UserInputService = cloneref(game:GetService("UserInputService"))
 local TweenService = cloneref(game:GetService("TweenService"))
-local GuiService = cloneref(game:GetService("GuiService"))
 local Workspace = cloneref(game:GetService("Workspace"))
 local CoreGui = cloneref(game:GetService("CoreGui"))
 local TextService = cloneref(game:GetService("TextService"))
@@ -46,6 +55,8 @@ local Theme = {
 	Field = Color3.fromRGB(22, 20, 28),
 	Menu = Color3.fromRGB(30, 28, 38),
 	Option = Color3.fromRGB(68, 60, 84),
+	Error = Color3.fromRGB(255, 138, 148),
+	Warn = Color3.fromRGB(255, 196, 120),
 }
 
 local TweenFast = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -53,15 +64,21 @@ local TweenFast = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirectio
 local Screen
 local Open = 0
 local Stopped = false
-local SpawnIndex = 0
 local Registry = {}
 local Watchers = {}
+local Homes = {}
 local Hidden = false
 local HideButton
 local KeyConn
-local InputConn
-local TouchWindows = 0
-
+local IconMoveConn
+local IconEndConn
+local IconDragging = false
+local IconDidDrag = false
+local IconCustom = false
+local IconKind
+local IconOrigin
+local IconGrab
+local IconPos
 local Drop = function(conn)
 	if not conn then
 		return
@@ -71,6 +88,22 @@ local Drop = function(conn)
 		conn:Disconnect()
 	end
 end
+
+type Props = any
+
+type New = ((className: "BindableEvent", props: Props, parent: Instance?) -> BindableEvent)
+	& ((className: "Frame", props: Props, parent: Instance?) -> Frame)
+	& ((className: "ScreenGui", props: Props, parent: Instance?) -> ScreenGui)
+	& ((className: "ScrollingFrame", props: Props, parent: Instance?) -> ScrollingFrame)
+	& ((className: "TextBox", props: Props, parent: Instance?) -> TextBox)
+	& ((className: "TextButton", props: Props, parent: Instance?) -> TextButton)
+	& ((className: "TextLabel", props: Props, parent: Instance?) -> TextLabel)
+	& ((className: "UICorner", props: Props, parent: Instance?) -> UICorner)
+	& ((className: "UIGradient", props: Props, parent: Instance?) -> UIGradient)
+	& ((className: "UIListLayout", props: Props, parent: Instance?) -> UIListLayout)
+	& ((className: "UIPadding", props: Props, parent: Instance?) -> UIPadding)
+	& ((className: "UISizeConstraint", props: Props, parent: Instance?) -> UISizeConstraint)
+	& ((className: "UIStroke", props: Props, parent: Instance?) -> UIStroke)
 
 local New = function(className, props, parent)
 	local Object = Instance.new(className)
@@ -83,7 +116,7 @@ local New = function(className, props, parent)
 
 	Object.Parent = parent
 	return Object
-end
+end :: New
 
 local Corner = function(parent, radius)
 	return New("UICorner", {
@@ -163,7 +196,7 @@ local EncodeValue = function(value)
 	return string.gsub(tostring(value), "[\r\n]", Span.s)
 end
 
-local DecodeValue = function(raw)
+local DecodeValue = function(raw: string)
 	if raw == "true" then
 		return true
 	end
@@ -220,7 +253,7 @@ local ReadMap = function(path)
 	for line in string.gmatch(Body, "[^\r\n]+") do
 		local Key, Raw = string.match(line, "^([^=]+)=(.*)$")
 
-		if Key then
+		if Key and Raw then
 			Map[Key] = DecodeValue(Raw)
 		end
 	end
@@ -275,6 +308,10 @@ local IsPointer = function(input)
 	return false
 end
 
+local Pointer = function(input)
+	return Vector2.new(input.Position.X, input.Position.Y)
+end
+
 local IsMove = function(input)
 	local Kind = input.UserInputType
 
@@ -289,21 +326,7 @@ local IsMove = function(input)
 	return false
 end
 
-local UseTouch = function()
-	local Preferred = UserInputService.PreferredInput
-
-	if Preferred == Enum.PreferredInput.Touch then
-		return true
-	end
-
-	if Preferred == Enum.PreferredInput.KeyboardAndMouse then
-		return false
-	end
-
-	return UserInputService.TouchEnabled
-end
-
-local ReadMetrics = function(forceTouch)
+local ReadMetrics = function()
 	local Camera = Workspace.CurrentCamera
 	local Viewport = Vector2.new(1280, 720)
 
@@ -311,12 +334,8 @@ local ReadMetrics = function(forceTouch)
 		Viewport = Camera.ViewportSize
 	end
 
-	local Touch = UseTouch()
-
-	if forceTouch == true then
-		Touch = true
-	elseif forceTouch == false then
-		Touch = false
+	if Viewport.X < 1 then
+		Viewport = Vector2.new(1280, 720)
 	end
 
 	local Margin = 16
@@ -326,59 +345,48 @@ local ReadMetrics = function(forceTouch)
 		Room = math.max(128, Viewport.X - 8)
 	end
 
-	local Width = 248
+	local Short = math.min(Viewport.X, Viewport.Y)
+	local Scale = Short / 800
 
-	if Touch then
-		Width = math.min(300, math.floor(Room * 0.92))
+	if Scale < 0.72 then
+		Scale = 0.72
 	end
+
+	if Scale > 1.2 then
+		Scale = 1.2
+	end
+
+	local Width = math.floor(260 * Scale)
 
 	if Width > Room then
 		Width = math.floor(Room)
 	end
 
+	if Width < 168 then
+		Width = math.min(168, math.floor(Room))
+	end
+
 	local Vert = { v = 0 }
 	Width += Vert.v
 
-	local Text = 13
-	local TitleH = 36
-	local Pad = 10
-	local ToggleH = 36
-	local ButtonH = 32
-	local SwitchW = 42
-	local SwitchH = 22
-	local Thumb = 8
-	local ThumbH = 20
-	local TrackH = 8
-
-	if Touch then
-		Text = 15
-		TitleH = 44
-		Pad = 12
-		ToggleH = 46
-		ButtonH = 42
-		SwitchW = 50
-		SwitchH = 28
-		Thumb = 10
-		ThumbH = 26
-		TrackH = 10
-	end
-
-	if Width < 230 then
-		Text = math.max(12, Text - 1)
-		Pad = math.max(8, Pad - 2)
-		TitleH = math.max(32, TitleH - 4)
-		ToggleH = math.max(34, ToggleH - 6)
-		ButtonH = math.max(30, ButtonH - 4)
-		SwitchW = math.max(36, SwitchW - 8)
-		SwitchH = math.max(20, SwitchH - 4)
-		Thumb = math.max(8, Thumb - 1)
-		ThumbH = math.max(16, ThumbH - 4)
-	end
-
-	local Inner = { i = 8 }
+	local Text = math.max(12, math.floor(14 * Scale))
+	local TitleH = math.max(32, math.floor(38 * Scale))
+	local Pad = math.max(8, math.floor(12 * Scale))
+	local ToggleH = math.max(32, math.floor(38 * Scale))
+	local ButtonH = math.max(30, math.floor(34 * Scale))
+	local SwitchW = math.max(36, math.floor(44 * Scale))
+	local SwitchH = math.max(20, math.floor(24 * Scale))
+	local Thumb = math.max(8, math.floor(8 * Scale))
+	local ThumbH = math.max(16, math.floor(22 * Scale))
+	local TrackH = math.max(6, math.floor(8 * Scale))
+	local FieldH = math.max(30, math.floor(34 * Scale))
+	local ItemH = math.max(26, math.floor(30 * Scale))
+	local Chrome = math.max(22, math.floor(28 * Scale))
+	local Inner = { i = math.max(6, math.floor(8 * Scale)) }
 
 	return {
-		Touch = Touch,
+		Scale = Scale,
+		WidthScale = Width / Viewport.X,
 		Width = Width,
 		Text = Text,
 		TitleH = TitleH,
@@ -392,6 +400,9 @@ local ReadMetrics = function(forceTouch)
 		Thumb = Thumb,
 		ThumbH = ThumbH,
 		TrackH = TrackH,
+		FieldH = FieldH,
+		ItemH = ItemH,
+		Chrome = Chrome,
 	}
 end
 
@@ -453,22 +464,6 @@ local ParentScreen = function(gui)
 	end
 end
 
-local NeedHideButton = function()
-	if Hidden then
-		return true
-	end
-
-	if TouchWindows > 0 then
-		return true
-	end
-
-	if not UserInputService.KeyboardEnabled then
-		return true
-	end
-
-	return UseTouch()
-end
-
 local IconStroke
 local IconGlyph
 local IconRule
@@ -481,24 +476,44 @@ local PaintHideButton = function()
 	local Hot = HideButton:GetAttribute("Hot") == true
 	local Down = HideButton:GetAttribute("Down") == true
 	local Ink = Theme.Accent
+	local Fill = Theme.Window
+	local Fade = 0.42
 
 	HideButton.Text = ""
 
 	if Hidden then
-		HideButton.BackgroundColor3 = Down and Theme.AccentPressed or Theme.Accent
+		Fill = Theme.Accent
+		Fade = 0.28
 		Ink = Theme.OnAccent
+
+		if Down then
+			Fill = Theme.AccentPressed
+			Fade = 0.15
+		end
 	elseif Down then
-		HideButton.BackgroundColor3 = Theme.Option
+		Fill = Theme.Option
+		Fade = 0.12
 		Ink = Theme.Text
 	elseif Hot then
-		HideButton.BackgroundColor3 = Theme.Track
+		Fill = Theme.Track
+		Fade = 0.22
 		Ink = Theme.Text
-	else
-		HideButton.BackgroundColor3 = Theme.Window
 	end
 
+	HideButton.BackgroundColor3 = Fill
+	HideButton.BackgroundTransparency = Fade
+
 	if IconStroke and IconStroke.Parent then
-		IconStroke.Color = Hidden and Theme.OnAccent or Theme.Stroke
+		IconStroke.Color = Theme.Stroke
+		IconStroke.Transparency = 0.4
+
+		if Hidden then
+			IconStroke.Color = Theme.OnAccent
+		end
+
+		if Hot or Down then
+			IconStroke.Transparency = 0.15
+		end
 	end
 
 	if IconGlyph and IconGlyph.Parent then
@@ -510,29 +525,95 @@ local PaintHideButton = function()
 	end
 end
 
+local Dock = function()
+	local Metrics = ReadMetrics()
+	local Viewport = ViewportOf()
+	local IconSize = math.max(30, math.floor(34 * Metrics.Scale))
+	local Edge = math.max(10, math.floor(12 * Metrics.Scale))
+	local Gap = math.max(8, math.floor(10 * Metrics.Scale))
+	local Top = 72
+
+	return {
+		Metrics = Metrics,
+		Viewport = Viewport,
+		IconSize = IconSize,
+		Gap = Gap,
+		Top = Top,
+		Right = Viewport.X - Edge - IconSize - Gap,
+		IconX = Viewport.X - Edge - IconSize,
+		IconY = Top + math.floor((Metrics.TitleH - IconSize) * 0.5),
+	}
+end
+
 local PlaceIcon = function()
 	if not HideButton or not HideButton.Parent then
 		return
 	end
 
-	local Viewport = ViewportOf()
-	local Inset = GuiService:GetGuiInset()
-	local Bottom = math.max(18, math.floor(Inset.Y * 0.35))
+	local Layout = Dock()
+	local Size = Layout.IconSize
 
-	if UseTouch() or TouchWindows > 0 then
-		Bottom = math.max(Bottom, 30)
+	HideButton.Size = UDim2.fromOffset(Size, Size)
+
+	if IconCustom and IconPos then
+		local MaxX = Layout.Viewport.X - Size - 8
+		local MaxY = Layout.Viewport.Y - Size - 8
+
+		if MaxX < 8 then
+			MaxX = 8
+		end
+
+		if MaxY < 8 then
+			MaxY = 8
+		end
+
+		IconPos = Vector2.new(math.clamp(IconPos.X, 8, MaxX), math.clamp(IconPos.Y, 8, MaxY))
+		HideButton.AnchorPoint = Vector2.new(0, 0)
+		HideButton.Position = UDim2.fromOffset(IconPos.X, IconPos.Y)
+		return
 	end
 
-	local Side = 12
+	HideButton.AnchorPoint = Vector2.new(0, 0)
+	HideButton.Position = UDim2.fromOffset(Layout.IconX, Layout.IconY)
+end
 
-	if Viewport.X < 360 then
-		Side = 8
-		Bottom = math.max(Bottom, 24)
+local PackHomes = function()
+	local Layout = Dock()
+	local Cursor = Layout.Right
+
+	for index = #Homes, 1, -1 do
+		local Home = Homes[index]
+
+		if Home.Panel.Parent and not Home.Dragged then
+			local Width = Home.Panel.AbsoluteSize.X
+
+			if Width < 2 then
+				Width = Layout.Metrics.Width
+			end
+
+			Cursor -= Width
+			local X = Cursor + Home.Nudge
+
+			if X < 8 then
+				X = 8
+			end
+
+			Home.Panel.Position = UDim2.fromOffset(X, Layout.Top + Home.NudgeY)
+			Cursor -= Layout.Gap
+		end
 	end
 
-	HideButton.AnchorPoint = Vector2.new(1, 1)
-	HideButton.Position = UDim2.new(1, -Side, 1, -Bottom)
-	HideButton.Size = UDim2.fromOffset(Viewport.X < 360 and 40 or 44, Viewport.X < 360 and 40 or 44)
+	PlaceIcon()
+end
+
+local SyncIcon = function()
+	if not HideButton or not HideButton.Parent then
+		return
+	end
+
+	HideButton.Visible = true
+	PlaceIcon()
+	PaintHideButton()
 end
 
 local ApplyHidden = function()
@@ -549,16 +630,6 @@ local ApplyHidden = function()
 	end
 
 	SyncIcon()
-end
-
-local SyncIcon = function()
-	if not HideButton or not HideButton.Parent then
-		return
-	end
-
-	HideButton.Visible = NeedHideButton()
-	PlaceIcon()
-	PaintHideButton()
 end
 
 local ToggleHidden = function()
@@ -582,20 +653,12 @@ local BindHide = function()
 
 		ToggleHidden()
 	end)
-
-	InputConn = UserInputService:GetPropertyChangedSignal("PreferredInput"):Connect(function()
-		if not HideButton then
-			return
-		end
-
-		HideButton.Visible = NeedHideButton()
-		PlaceIcon()
-	end)
 end
 
 local EnsureHideButton = function()
 	if HideButton and HideButton.Parent == Screen then
-		HideButton.Visible = NeedHideButton()
+		HideButton.Visible = true
+		PlaceIcon()
 		PaintHideButton()
 		return
 	end
@@ -605,13 +668,14 @@ local EnsureHideButton = function()
 		Text = "",
 		AutoButtonColor = false,
 		BackgroundColor3 = Theme.Window,
+		BackgroundTransparency = 0.42,
 		BorderSizePixel = 0,
 		AnchorPoint = Vector2.new(1, 1),
 		Position = UDim2.new(1, -12, 1, -30),
 		Size = UDim2.fromOffset(44, 44),
 		Active = true,
 		Selectable = false,
-		Visible = NeedHideButton(),
+		Visible = true,
 		ZIndex = 80,
 	}, Screen)
 
@@ -619,6 +683,7 @@ local EnsureHideButton = function()
 
 	IconStroke = New("UIStroke", {
 		Color = Theme.Stroke,
+		Transparency = 0.4,
 		Thickness = 1,
 		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
 		LineJoinMode = Enum.LineJoinMode.Round,
@@ -673,20 +738,85 @@ local EnsureHideButton = function()
 			return
 		end
 
+		local Point = Pointer(input)
+
+		IconDragging = true
+		IconDidDrag = false
+		IconKind = input.UserInputType
+		IconOrigin = Point
+		IconGrab = Point - HideButton.AbsolutePosition
 		HideButton:SetAttribute("Down", true)
 		PaintHideButton()
 	end)
 
-	HideButton.InputEnded:Connect(function(input)
-		if not IsPointer(input) then
+	if not IconMoveConn then
+		IconMoveConn = UserInputService.InputChanged:Connect(function(input)
+			local Grab = IconGrab
+			local From = IconOrigin
+			local Button = HideButton
+			local Gui = Screen
+
+			if not IconDragging or not Grab or not From or not Button or not Button.Parent or not Gui or not IsMove(input) then
+				return
+			end
+
+			local Point = Pointer(input)
+
+			if not IconDidDrag and (Point - From).Magnitude < 5 then
+				return
+			end
+
+			local TopLeft = Point - Grab
+			local Origin = Gui.AbsolutePosition
+			local Next = Vector2.new(TopLeft.X - Origin.X, TopLeft.Y - Origin.Y)
+
+			IconDidDrag = true
+			IconCustom = true
+
+			local Size = Button.AbsoluteSize.X
+
+			if Size < 2 then
+				Size = Button.Size.X.Offset
+			end
+
+			local ParentSize = Gui.AbsoluteSize
+			local MaxX = ParentSize.X - Size - 8
+			local MaxY = ParentSize.Y - Size - 8
+
+			if MaxX < 8 then
+				MaxX = 8
+			end
+
+			if MaxY < 8 then
+				MaxY = 8
+			end
+
+			IconPos = Vector2.new(math.clamp(Next.X, 8, MaxX), math.clamp(Next.Y, 8, MaxY))
+			Button.AnchorPoint = Vector2.new(0, 0)
+			Button.Position = UDim2.fromOffset(IconPos.X, IconPos.Y)
+		end)
+
+		IconEndConn = UserInputService.InputEnded:Connect(function(input)
+			if not IconDragging or input.UserInputType ~= IconKind then
+				return
+			end
+
+			IconDragging = false
+			IconKind = nil
+
+			if HideButton and HideButton.Parent then
+				HideButton:SetAttribute("Down", false)
+				PaintHideButton()
+			end
+		end)
+	end
+
+	HideButton.Activated:Connect(function()
+		if IconDidDrag then
+			IconDidDrag = false
 			return
 		end
 
-		HideButton:SetAttribute("Down", false)
-		PaintHideButton()
-	end)
-
-	HideButton.Activated:Connect(function()
 		if Hidden then
 			Hidden = false
 			ApplyHidden()
@@ -759,6 +889,10 @@ local EnsureScreen = function()
 		Enabled = true,
 	})
 
+	pcall(function()
+		Screen.ScreenInsets = Enum.ScreenInsets.None
+	end)
+
 	local StopEvent = New("BindableEvent", {
 		Name = "Stop",
 	}, Screen)
@@ -799,15 +933,25 @@ StopAll = function()
 	end
 
 	HideButton = nil
+	IconDragging = false
+	IconDidDrag = false
+	IconCustom = false
+	IconGrab = nil
+	IconPos = nil
 
 	if KeyConn then
 		KeyConn:Disconnect()
 		KeyConn = nil
 	end
 
-	if InputConn then
-		InputConn:Disconnect()
-		InputConn = nil
+	if IconMoveConn then
+		IconMoveConn:Disconnect()
+		IconMoveConn = nil
+	end
+
+	if IconEndConn then
+		IconEndConn:Disconnect()
+		IconEndConn = nil
 	end
 
 	Open = 0
@@ -842,23 +986,8 @@ MinimUI.Window = function(self, config)
 		FileName = SafeName(FileName)
 	end
 
-	local Mobile = config.Mobile
-
-	if Mobile == nil then
-		Mobile = config.Touch
-	end
-
-	local ForcedTouch = nil
-
-	if Mobile == true then
-		ForcedTouch = true
-		TouchWindows += 1
-	elseif Mobile == false then
-		ForcedTouch = false
-	end
-
 	local MetricsOf = function()
-		return ReadMetrics(ForcedTouch)
+		return ReadMetrics()
 	end
 
 	local Alive = true
@@ -867,9 +996,6 @@ MinimUI.Window = function(self, config)
 	local Refreshers = {}
 	local Order = 0
 	local Metrics = MetricsOf()
-
-	SpawnIndex += 1
-	local Slot = (SpawnIndex - 1) % 6
 
 	local Gui = EnsureScreen()
 
@@ -1002,7 +1128,7 @@ MinimUI.Window = function(self, config)
 		BorderSizePixel = 0,
 		ClipsDescendants = true,
 		Active = true,
-		Size = UDim2.fromOffset(Metrics.Width, Metrics.TitleH + 8),
+		Size = UDim2.new(Metrics.WidthScale, 0, 0, Metrics.TitleH + 8),
 	}, Gui)
 
 	Panel.Visible = not Hidden
@@ -1174,7 +1300,6 @@ MinimUI.Window = function(self, config)
 
 	local SetOffset = function(x, y, height)
 		local Viewport = ViewportOf()
-		local Inset = GuiService:GetGuiInset()
 		local Width = Panel.AbsoluteSize.X
 		local Height = height
 
@@ -1191,7 +1316,7 @@ MinimUI.Window = function(self, config)
 		end
 
 		local MinX = 8
-		local MinY = Inset.Y + 8
+		local MinY = 8
 		local Bottom = 12
 
 		if HideButton and HideButton.Visible and HideButton.Parent then
@@ -1242,14 +1367,13 @@ MinimUI.Window = function(self, config)
 		Reflowing = true
 
 		local Viewport = ViewportOf()
-		local Inset = GuiService:GetGuiInset()
 		local Bottom = 12
 
 		if HideButton and HideButton.Visible and HideButton.Parent then
 			Bottom = HideButton.AbsoluteSize.Y + 18
 		end
 
-		local Room = Viewport.Y - Inset.Y - Bottom - TitleBarH - 8
+		local Room = Viewport.Y - Bottom - TitleBarH - 8
 
 		if Room < Metrics.ButtonH then
 			Room = Metrics.ButtonH
@@ -1283,7 +1407,7 @@ MinimUI.Window = function(self, config)
 			Shown = 0
 		end
 
-		Panel.Size = UDim2.fromOffset(Metrics.Width, TitleBarH + Shown)
+		Panel.Size = UDim2.new(Metrics.WidthScale, 0, 0, TitleBarH + Shown)
 		Content.CanvasSize = UDim2.fromOffset(0, ContentH)
 		Content.Visible = not Minimized
 		Divider.Visible = not Minimized
@@ -1333,11 +1457,7 @@ MinimUI.Window = function(self, config)
 	local ChromeW = 72
 
 	local PlaceChrome = function()
-		local Size = 26
-
-		if Metrics.Touch then
-			Size = 32
-		end
+		local Size = Metrics.Chrome
 
 		local Gap = 4
 		local Edge = 8
@@ -1393,34 +1513,34 @@ MinimUI.Window = function(self, config)
 		Divider.Size = UDim2.new(1, -(Metrics.Pad * 2), 0, 1)
 		FitTitle()
 
-		if Metrics.Touch then
-			Content.ScrollBarThickness = 4
-		else
-			Content.ScrollBarThickness = 3
-		end
+		Content.ScrollBarThickness = 3
 
 		for index = 1, #Refreshers do
 			Refreshers[index]()
 		end
 
 		Reflow()
+		PackHomes()
 	end
 
-	local Viewport = ViewportOf()
-	local Inset = GuiService:GetGuiInset()
 	local Edge = { e = 0 }
-	local StartX = math.floor((Viewport.X - Metrics.Width) * 0.5) + Slot * 16 + Edge.e
-	local StartY = math.floor(Inset.Y + math.max(20, Viewport.Y * 0.14)) + Slot * 16
+	local Home = {
+		Panel = Panel,
+		Dragged = false,
+		Nudge = Edge.e,
+		NudgeY = 0,
+	}
 
 	if type(config.Shift) == "number" then
-		StartX += config.Shift
+		Home.Nudge += config.Shift
 	end
 
 	if type(config.ShiftY) == "number" then
-		StartY += config.ShiftY
+		Home.NudgeY = config.ShiftY
 	end
 
-	Panel.Position = UDim2.fromOffset(StartX, StartY)
+	Homes[#Homes + 1] = Home
+	PackHomes()
 
 	Connect(List:GetPropertyChangedSignal("AbsoluteContentSize"), Reflow)
 	Connect(Content:GetPropertyChangedSignal("CanvasPosition"), ClosePopups)
@@ -1441,7 +1561,6 @@ MinimUI.Window = function(self, config)
 	end
 
 	Connect(Workspace:GetPropertyChangedSignal("CurrentCamera"), HookCamera)
-	Connect(UserInputService:GetPropertyChangedSignal("PreferredInput"), ApplyMetrics)
 	HookCamera()
 
 	local DragOn = false
@@ -1457,17 +1576,25 @@ MinimUI.Window = function(self, config)
 		DragOn = true
 		ClosePopups()
 		DragKind = input.UserInputType
-		DragOrigin = input.Position
+		DragOrigin = Pointer(input)
 		DragPos = Panel.Position
 	end)
 
 	Connect(UserInputService.InputChanged, function(input)
-		if not Alive or not DragOn or not IsMove(input) then
+		local From = DragOrigin
+		local Pos = DragPos
+
+		if not Alive or not DragOn or not From or not Pos or not IsMove(input) then
 			return
 		end
 
-		local Delta = input.Position - DragOrigin
-		SetOffset(DragPos.X.Offset + Delta.X, DragPos.Y.Offset + Delta.Y)
+		local Delta = Pointer(input) - From
+
+		if not Home.Dragged and Delta.Magnitude >= 5 then
+			Home.Dragged = true
+		end
+
+		SetOffset(Pos.X.Offset + Delta.X, Pos.Y.Offset + Delta.Y)
 	end)
 
 	Connect(UserInputService.InputEnded, function(input)
@@ -1596,19 +1723,16 @@ MinimUI.Window = function(self, config)
 		DragOn = false
 		ClosePopups()
 
-		if ForcedTouch == true then
-			TouchWindows -= 1
+		Registry[Panel] = nil
 
-			if TouchWindows < 0 then
-				TouchWindows = 0
-			end
-
-			if HideButton and HideButton.Parent then
-				HideButton.Visible = NeedHideButton()
+		for index = #Homes, 1, -1 do
+			if Homes[index] == Home then
+				table.remove(Homes, index)
+				break
 			end
 		end
 
-		Registry[Panel] = nil
+		PackHomes()
 
 		for index = #Watchers, 1, -1 do
 			if Watchers[index] == Watch then
@@ -1935,7 +2059,11 @@ MinimUI.Window = function(self, config)
 		end
 
 		local Apply = function(nextValue, silent, instant)
-			nextValue = nextValue and true or false
+			if nextValue then
+				nextValue = true
+			else
+				nextValue = false
+			end
 
 			if nextValue == Value then
 				Paint(instant)
@@ -2371,11 +2499,7 @@ MinimUI.Window = function(self, config)
 		local OutsideConn
 		local PlaceConn
 		local CaptionH = Metrics.Text + 2
-		local FieldH = 32
-
-		if Metrics.Touch then
-			FieldH = 40
-		end
+		local FieldH = Metrics.FieldH
 
 		local CopyOptions = function(list)
 			table.clear(Options)
@@ -2620,7 +2744,13 @@ MinimUI.Window = function(self, config)
 				local On = Chosen(Row.Button.Text)
 
 				if On then
-					Row.Button.BackgroundTransparency = Row.Down and 0.5 or 0.76
+					local Fade = 0.76
+
+					if Row.Down then
+						Fade = 0.5
+					end
+
+					Row.Button.BackgroundTransparency = Fade
 				elseif Row.Down then
 					Row.Button.BackgroundTransparency = 0.62
 				elseif Row.Hot then
@@ -2760,13 +2890,9 @@ MinimUI.Window = function(self, config)
 
 			Placing = true
 
-			local ItemH = 28
+			local ItemH = Metrics.ItemH
 			local ItemGap = 3
 			local MenuInset = 5
-
-			if Metrics.Touch then
-				ItemH = 34
-			end
 
 			local Shown = math.min(#Options, 6)
 			local MenuH = MenuInset * 2 + Shown * ItemH
@@ -2855,13 +2981,9 @@ MinimUI.Window = function(self, config)
 			Field:SetAttribute("Hold", true)
 			FieldStroke.Color = Theme.Accent
 
-			local ItemH = 28
+			local ItemH = Metrics.ItemH
 			local ItemGap = 3
 			local MenuInset = 5
-
-			if Metrics.Touch then
-				ItemH = 34
-			end
 
 			Menu = New("Frame", {
 				Name = "Menu",
@@ -3045,11 +3167,7 @@ MinimUI.Window = function(self, config)
 			local TextSize = math.max(11, Metrics.Text - 1)
 
 			CaptionH = Measure(Caption.Text, TextSize, RowWidth(Row, 0))
-			FieldH = 32
-
-			if Metrics.Touch then
-				FieldH = 40
-			end
+			FieldH = Metrics.FieldH
 
 			Caption.TextSize = TextSize
 			Caption.Size = UDim2.new(1, 0, 0, CaptionH)
@@ -3170,11 +3288,7 @@ MinimUI.Window = function(self, config)
 			Value = tostring(Default)
 		end
 
-		local FieldH = 32
-
-		if Metrics.Touch then
-			FieldH = 40
-		end
+		local FieldH = Metrics.FieldH
 
 		local Row = New("Frame", {
 			Name = "Textbox",
@@ -3212,15 +3326,15 @@ MinimUI.Window = function(self, config)
 			BorderSizePixel = 0,
 			ClearTextOnFocus = false,
 			Font = Enum.Font.GothamMedium,
-			MultiLine = true,
+			MultiLine = false,
 			PlaceholderColor3 = Theme.Muted,
 			PlaceholderText = tostring(Pick(config, "Placeholder", "PlaceHolder") or ""),
 			Text = Value,
 			TextColor3 = Theme.Text,
 			TextSize = Metrics.Text,
-			TextWrapped = true,
+			TextWrapped = false,
 			TextXAlignment = Enum.TextXAlignment.Left,
-			TextYAlignment = Enum.TextYAlignment.Top,
+			TextYAlignment = Enum.TextYAlignment.Center,
 			ClipsDescendants = true,
 			Size = UDim2.new(1, 0, 0, FieldH),
 			LayoutOrder = 2,
@@ -3234,14 +3348,96 @@ MinimUI.Window = function(self, config)
 			ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
 		}, Box)
 
-		local PaintBox = function(hot, down)
+		local Status = "ok"
+		local StatusText = ""
+		local Hot = false
+		local Down = false
+
+		local Expect = function(text)
+			local Level = "ok"
+			local Message = ""
+
+			local Keep = function(nextLevel, nextMessage)
+				if nextLevel ~= "error" and nextLevel ~= "warn" then
+					return
+				end
+
+				if Level == "error" then
+					return
+				end
+
+				if Level == "warn" and nextLevel ~= "error" then
+					return
+				end
+
+				Level = nextLevel
+				Message = tostring(nextMessage or "")
+			end
+
+			local Count = #text
+			local Length = utf8.len(text)
+
+			if Length then
+				Count = Length
+			end
+
+			if text == "" then
+				if config.Required == true then
+					Keep("error", config.Empty or "Required")
+				end
+			else
+				if type(config.Min) == "number" and Count < config.Min then
+					Keep("error", config.MinText or ("At least " .. config.Min .. " characters"))
+				end
+
+				if type(config.Max) == "number" and Count > config.Max then
+					Keep("error", config.MaxText or ("At most " .. config.Max .. " characters"))
+				end
+
+				if type(config.Pattern) == "string" and config.Pattern ~= "" then
+					local Ran, Matched = pcall(string.match, text, config.Pattern)
+
+					if not Ran then
+						Keep("error", "Bad pattern")
+					elseif not Matched then
+						Keep("error", config.PatternText or "Unexpected format")
+					end
+				end
+			end
+
+			if type(config.Validate) == "function" then
+				local Ran, Kind, NoteText = pcall(config.Validate, text)
+
+				if not Ran then
+					Keep("error", "Check failed")
+				elseif Kind == "error" or Kind == "warn" then
+					Keep(Kind, NoteText or (Kind == "error" and "Invalid" or "Check this"))
+				elseif Kind == false then
+					Keep("error", NoteText or "Invalid")
+				end
+			end
+
+			return Level, Message
+		end
+
+		local PaintBox = function()
 			if not BoxStroke.Parent then
 				return
 			end
 
-			if down then
+			if Status == "error" then
+				BoxStroke.Color = Theme.Error
+				return
+			end
+
+			if Status == "warn" and not Down then
+				BoxStroke.Color = Theme.Warn
+				return
+			end
+
+			if Down then
 				BoxStroke.Color = Theme.AccentPressed
-			elseif hot or Box:IsFocused() then
+			elseif Hot or Box:IsFocused() then
 				BoxStroke.Color = Theme.Accent
 			else
 				BoxStroke.Color = Theme.Stroke
@@ -3249,39 +3445,79 @@ MinimUI.Window = function(self, config)
 		end
 
 		Connect(Box.MouseEnter, function()
-			PaintBox(true, false)
+			Hot = true
+			PaintBox()
 		end)
 
 		Connect(Box.MouseLeave, function()
-			PaintBox(false, false)
+			Hot = false
+			Down = false
+			PaintBox()
 		end)
 
 		Connect(Box.Focused, function()
-			PaintBox(true, false)
+			PaintBox()
 		end)
 
 		Connect(Box.FocusLost, function()
-			PaintBox(false, false)
+			PaintBox()
 		end)
 
 		Connect(Box.InputBegan, function(input)
-			if IsPointer(input) then
-				PaintBox(true, true)
+			if not IsPointer(input) then
+				return
 			end
+
+			Down = true
+			PaintBox()
 		end)
 
 		Connect(Box.InputEnded, function(input)
-			if IsPointer(input) then
-				PaintBox(true, false)
+			if not IsPointer(input) then
+				return
 			end
+
+			Down = false
+			PaintBox()
 		end)
 
-		New("UIPadding", {
-			PaddingTop = UDim.new(0, 8),
-			PaddingBottom = UDim.new(0, 8),
+		local BoxPad = New("UIPadding", {
+			PaddingTop = UDim.new(0, 0),
+			PaddingBottom = UDim.new(0, 0),
 			PaddingLeft = UDim.new(0, 10),
 			PaddingRight = UDim.new(0, 10),
 		}, Box)
+
+		local StatusLabel = New("TextLabel", {
+			Name = "Status",
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Font = Enum.Font.GothamMedium,
+			Text = "",
+			TextColor3 = Theme.Error,
+			TextSize = math.max(11, Metrics.Text - 2),
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextWrapped = true,
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Size = UDim2.new(1, 0, 0, 0),
+			Visible = false,
+			LayoutOrder = 3,
+			Active = false,
+		}, Row)
+
+		local PaintNote = function()
+			StatusLabel.Text = StatusText
+			StatusLabel.Visible = StatusText ~= ""
+			StatusLabel.TextSize = math.max(11, Metrics.Text - 2)
+
+			if Status == "error" then
+				StatusLabel.TextColor3 = Theme.Error
+			else
+				StatusLabel.TextColor3 = Theme.Warn
+			end
+
+			PaintBox()
+		end
 
 		local Emit = function()
 			if Firing or type(Callback) ~= "function" then
@@ -3289,7 +3525,7 @@ MinimUI.Window = function(self, config)
 			end
 
 			Firing = true
-			local Ok, Err = pcall(Callback, Value)
+			local Ok, Err = pcall(Callback, Value, Status, StatusText)
 			Firing = false
 
 			if not Ok then
@@ -3304,11 +3540,7 @@ MinimUI.Window = function(self, config)
 				return
 			end
 
-			FieldH = 32
-
-			if Metrics.Touch then
-				FieldH = 40
-			end
+			FieldH = Metrics.FieldH
 
 			Caption.TextSize = math.max(11, Metrics.Text - 1)
 			Box.TextSize = Metrics.Text
@@ -3320,7 +3552,25 @@ MinimUI.Window = function(self, config)
 			end
 
 			local TextH = Measure(Sample, Metrics.Text, RowWidth(Box, 20))
-			local BoxH = math.clamp(TextH + 16, FieldH, 120)
+			local OneLine = Measure("Ag", Metrics.Text, 4000)
+			local Wrapped = TextH > OneLine + 1
+			local PadY = 0
+			local BoxH = FieldH
+
+			if Wrapped then
+				PadY = 8
+				BoxH = math.clamp(TextH + PadY * 2, FieldH, 120)
+				Box.MultiLine = true
+				Box.TextWrapped = true
+				Box.TextYAlignment = Enum.TextYAlignment.Top
+			else
+				Box.MultiLine = false
+				Box.TextWrapped = false
+				Box.TextYAlignment = Enum.TextYAlignment.Center
+			end
+
+			BoxPad.PaddingTop = UDim.new(0, PadY)
+			BoxPad.PaddingBottom = UDim.new(0, PadY)
 
 			if Box.Size.Y.Offset ~= BoxH then
 				Box.Size = UDim2.new(1, 0, 0, BoxH)
@@ -3330,7 +3580,11 @@ MinimUI.Window = function(self, config)
 		Refreshers[#Refreshers + 1] = FitBox
 		Connect(Box:GetPropertyChangedSignal("AbsoluteSize"), FitBox)
 
-		local Commit = function()
+		local Sync = function(report)
+			local Level, Message = Expect(Box.Text)
+			Status = Level
+			StatusText = Message
+			PaintNote()
 			FitBox()
 
 			if Box.Text == Value then
@@ -3338,22 +3592,27 @@ MinimUI.Window = function(self, config)
 			end
 
 			Value = Box.Text
+
+			if not report then
+				return
+			end
+
 			Emit()
 			Note(FlagName)
 		end
 
-		Connect(Box.FocusLost, function()
+		Connect(Box:GetPropertyChangedSignal("Text"), function()
 			if not Alive then
 				return
 			end
 
-			Commit()
+			Sync(true)
 		end)
 
 		local Handle = {}
 
 		Handle.Get = function(self)
-			return Value
+			return Value, Status, StatusText
 		end
 
 		Handle.Set = function(self, value)
@@ -3362,21 +3621,31 @@ MinimUI.Window = function(self, config)
 			end
 
 			local Next = tostring(value or "")
+			local Changed = Next ~= Value or Box.Text ~= Next
 
-			if Next == Value and Box.Text == Next then
+			Value = Next
+
+			if Box.Text ~= Next then
+				Box.Text = Next
+			end
+
+			local Level, Message = Expect(Next)
+			Status = Level
+			StatusText = Message
+			PaintNote()
+			FitBox()
+
+			if not Changed then
 				return
 			end
 
-			Value = Next
-			Box.Text = Next
-			FitBox()
 			Emit()
 			Note(FlagName)
 		end
 
 		Handle.Destroy = DestroyRow
 		BindFlag(FlagName, Handle)
-		FitBox()
+		Sync(false)
 
 		return Handle
 	end
@@ -3396,10 +3665,11 @@ MinimUI.Window = function(self, config)
 			end
 
 			if type(value) == "string" then
-				local Red, Green, Blue = string.match(value, "^#?(%x%x)(%x%x)(%x%x)$")
+				local Text: string = value :: string
+				local Red, Green, Blue = string.match(Text, "^#?(%x%x)(%x%x)(%x%x)$")
 
-				if Red then
-					return Color3.fromRGB(tonumber(Red, 16), tonumber(Green, 16), tonumber(Blue, 16))
+				if Red and Green and Blue then
+					return Color3.fromRGB(tonumber(Red, 16) or 0, tonumber(Green, 16) or 0, tonumber(Blue, 16) or 0)
 				end
 			end
 
@@ -3428,11 +3698,7 @@ MinimUI.Window = function(self, config)
 		local Opened = false
 		local Value = ColorFrom(Pick(config, "Default", "Value")) or Color3.fromRGB(208, 188, 255)
 		local Hue, Sat, Val = Value:ToHSV()
-		local FieldH = 32
-
-		if Metrics.Touch then
-			FieldH = 40
-		end
+		local FieldH = Metrics.FieldH
 
 		local Row = New("Frame", {
 			Name = "Color",
@@ -3864,11 +4130,7 @@ MinimUI.Window = function(self, config)
 				return
 			end
 
-			FieldH = 32
-
-			if Metrics.Touch then
-				FieldH = 40
-			end
+			FieldH = Metrics.FieldH
 
 			Caption.TextSize = math.max(11, Metrics.Text - 1)
 			Field.Size = UDim2.new(1, 0, 0, FieldH)
@@ -4012,7 +4274,13 @@ MinimUI.Window = function(self, config)
 				local Hot = Pill:GetAttribute("Hot") == true
 
 				if Pill.Text == Value then
-					Pill.BackgroundColor3 = Down and Theme.AccentPressed or Theme.Accent
+					local Fill = Theme.Accent
+
+					if Down then
+						Fill = Theme.AccentPressed
+					end
+
+					Pill.BackgroundColor3 = Fill
 					Pill.TextColor3 = Theme.OnAccent
 				elseif Hot or Down then
 					Pill.BackgroundColor3 = Theme.Option
@@ -4288,8 +4556,10 @@ MinimUI.Destroy = function()
 end
 
 MinimUI.Demo = function()
-	local Build = function(config)
-	local Window = MinimUI:Window(config)
+	local Window = MinimUI:Window({
+		Title = "Minim",
+		File = "minim",
+	})
 
 	if not Window then
 		return nil
@@ -4339,10 +4609,19 @@ MinimUI.Demo = function()
 	local Name = Window:Textbox({
 		Text = "Name",
 		Flag = "Name",
-		Placeholder = "Type a name",
+		Placeholder = "2 to 16 letters",
 		Default = "",
-		Callback = function(value)
-			print("[Minim] Name", value)
+		Required = true,
+		Min = 2,
+		Max = 16,
+		Pattern = "^[%a ]+$",
+		Validate = function(text)
+			if string.find(string.lower(text), "phone") then
+				return "warn", "Phone is not a name"
+			end
+		end,
+		Callback = function(value, level, message)
+			print("[Minim] Name", value, level, message)
 		end,
 	})
 
@@ -4372,69 +4651,14 @@ MinimUI.Demo = function()
 			local Count = Window:Get("Amount")
 			local Choice = Window:Get("Fruit")
 			local Picked = Window:Get("Fruits")
-			print("[Minim] Apply", On, Count, Choice, table.concat(Picked, ", "), Name:Get(), Tint:Get(), ChosenMode:Get())
+			local Text, Level, Message = Name:Get()
+			print("[Minim] Apply", On, Count, Choice, table.concat(Picked, ", "), Text, Level, Message, Tint:Get(), ChosenMode:Get())
 		end,
 	})
 
 	return Window
-	end
-
-	local ViewX = 1280
-	local ViewY = 720
-	local Camera = Workspace.CurrentCamera
-
-	if Camera then
-		ViewX = Camera.ViewportSize.X
-		ViewY = Camera.ViewportSize.Y
-	end
-
-	local Margin = 12
-	local Gap = 16
-	local DesktopW = math.min(248, math.max(148, ViewX - Margin * 2))
-	local PhoneW = math.min(300, math.max(160, math.floor((ViewX - Margin * 2) * 0.92)))
-	local SideBySide = DesktopW + PhoneW + Gap + Margin * 2 <= ViewX
-
-	if not SideBySide then
-		DesktopW = math.min(248, math.max(148, ViewX - Margin * 2))
-		PhoneW = math.min(300, DesktopW)
-	end
-
-	local DeskNatural = math.floor((ViewX - DesktopW) * 0.5)
-	local PhoneNatural = math.floor((ViewX - PhoneW) * 0.5) + 16
-
-	if SideBySide then
-		local Left = math.floor((ViewX - DesktopW - Gap - PhoneW) * 0.5)
-
-		if Left < Margin then
-			Left = Margin
-		end
-
-		Build({
-			Title = "Minim",
-			File = "minim",
-			Mobile = false,
-			Shift = Left - DeskNatural,
-		})
-
-		Build({
-			Title = "Phone",
-			File = "minim-phone",
-			Mobile = true,
-			Shift = Left + DesktopW + Gap - PhoneNatural,
-		})
-
-		return
-	end
-
-	Build({
-		Title = "Minim",
-		File = "minim",
-		Mobile = false,
-		Limit = 0.34,
-		Shift = Margin - DeskNatural,
-	})
 end
 
-MinimUI.Demo()
+-- MinimUI.Demo()
 
 return MinimUI
